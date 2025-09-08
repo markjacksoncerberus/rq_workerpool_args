@@ -1,5 +1,5 @@
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from redis import Redis
@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 from .defaults import DEFAULT_RESULT_TTL
 from .job import Callback
 from .queue import Queue
-from .utils import backend_class
 
 
 class job:  # noqa
@@ -22,10 +21,10 @@ class job:  # noqa
         timeout: Optional[int] = None,
         result_ttl: int = DEFAULT_RESULT_TTL,
         ttl: Optional[int] = None,
-        queue_class: Optional[Type['Queue']] = None,
-        depends_on: Optional[List[Any]] = None,
+        queue_class: Optional[type['Queue']] = None,
+        depends_on: Optional[list[Any]] = None,
         at_front: bool = False,
-        meta: Optional[Dict[Any, Any]] = None,
+        meta: Optional[dict[Any, Any]] = None,
         description: Optional[str] = None,
         failure_ttl: Optional[int] = None,
         retry: Optional['Retry'] = None,
@@ -56,9 +55,9 @@ class job:  # noqa
             queue_class (Optional[Queue], optional): A custom class that inherits from `Queue`. Defaults to None.
             depends_on (Optional[List[Any]], optional): A list of dependents jobs. Defaults to None.
             at_front (Optional[bool], optional): Whether to enqueue the job at front of the queue. Defaults to None.
-            meta (Optional[Dict[Any, Any]], optional): Arbitraty metadata about the job. Defaults to None.
+            meta (Optional[Dict[Any, Any]], optional): Arbitrary metadata about the job. Defaults to None.
             description (Optional[str], optional): Job description. Defaults to None.
-            failure_ttl (Optional[int], optional): Failture time to live. Defaults to None.
+            failure_ttl (Optional[int], optional): Failure time to live. Defaults to None.
             retry (Optional[Retry], optional): A Retry object. Defaults to None.
             on_failure (Optional[Union[Callback, Callable[..., Any]]], optional): Callable to run on failure. Defaults
                 to None.
@@ -68,7 +67,7 @@ class job:  # noqa
                 to None.
         """
         self.queue = queue
-        self.queue_class = backend_class(self, 'queue_class', override=queue_class)
+        self.queue_class = queue_class if queue_class else Queue
         self.connection = connection
         self.timeout = timeout
         self.result_ttl = result_ttl

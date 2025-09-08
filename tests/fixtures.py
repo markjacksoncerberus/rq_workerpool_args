@@ -47,7 +47,7 @@ def do_nothing():
     pass
 
 
-def raise_exc():
+def raise_exc(*args, **kwargs):
     raise Exception('raise_exc error')
 
 
@@ -107,7 +107,7 @@ def create_file_after_timeout_and_setpgrp(path, timeout):
 def launch_process_within_worker_and_store_pid(path, timeout):
     p = subprocess.Popen(['sleep', str(timeout)])
     with open(path, 'w') as f:
-        f.write('{}'.format(p.pid))
+        f.write(f'{p.pid}')
     p.wait()
 
 
@@ -146,18 +146,18 @@ class Number:
 
 class CallableObject:
     def __call__(self):
-        return u"I'm callable"
+        return "I'm callable"
 
 
 class UnicodeStringObject:
     def __repr__(self):
-        return u'é'
+        return 'é'
 
 
 class ClassWithAStaticMethod:
     @staticmethod
     def static_method():
-        return u"I'm a static method"
+        return "I'm a static method"
 
 
 def black_hole(job, *exc_info):
@@ -179,7 +179,11 @@ def save_key_ttl(key):
     job.save_meta()
 
 
-def long_running_job(timeout=10):
+def long_running_job(timeout=10, horse_pid_key=None):
+    job = get_current_job()
+    if horse_pid_key:
+        # Store the PID of the worker horse in a key
+        job.connection.set(horse_pid_key, os.getpid(), ex=60)
     time.sleep(timeout)
     return 'Done sleeping...'
 
@@ -203,13 +207,29 @@ def run_dummy_heroku_worker(sandbox, _imminent_shutdown_delay, connection):
             for i in range(20):
                 time.sleep(0.1)
             create_file(os.path.join(sandbox, 'finished'))
+            return True
 
     w = TestHerokuWorker(Queue('dummy', connection=connection), connection=connection)
-    w.main_work_horse(None, None)
+    w.main_work_horse(None, None)  # type: ignore[no-untyped-call]
 
 
 class DummyQueue:
     pass
+
+
+def kill_horse(horse_pid_key: str, connection_kwargs: dict, interval: float = 1.5):
+    """
+    Kill the worker horse process by its PID stored in a Redis key.
+    :param horse_pid_key: Redis key where the horse PID is stored
+    :param connection_kwargs: Connection parameters for Redis
+    :param interval: Time to wait before sending the kill signal
+    """
+    time.sleep(interval)
+    redis = Redis(**connection_kwargs)
+    value = redis.get(horse_pid_key)
+    if value:
+        pid = int(value)
+        os.kill(pid, signal.SIGKILL)
 
 
 def kill_worker(pid: int, double_kill: bool, interval: float = 1.5):
@@ -259,7 +279,6 @@ def start_worker_process(
     """
     Use multiprocessing to start a new worker in a separate process.
     """
-    connection = connection
     conn_kwargs = connection.connection_pool.connection_kwargs
     p = Process(target=start_worker, args=(queue_name, conn_kwargs, worker_name, burst, job_monitoring_interval))
     p.start()
@@ -298,7 +317,7 @@ def save_exception(job, connection, type, value, traceback):
     connection.set('failure_callback:%s' % job.id, str(value), ex=60)
 
 
-def save_result_if_not_stopped(job, connection, result=""):
+def save_result_if_not_stopped(job, connection, result=''):
     connection.set('stopped_callback:%s' % job.id, result, ex=60)
 
 

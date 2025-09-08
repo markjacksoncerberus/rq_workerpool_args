@@ -12,24 +12,20 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
 
     - name: Set up Python
-      uses: actions/setup-python@v5.1.1
+      uses: actions/setup-python@v5.6.0
       with:
-        python-version: 3.8
+        python-version: 3.9
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install black ruff
-
-    - name: Lint with black
-      run: |
-        black --check --skip-string-normalization --line-length 120 rq tests
+        pip install ruff
 
     - name: Lint with ruff
       run: |

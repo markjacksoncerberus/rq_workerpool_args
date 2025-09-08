@@ -7,30 +7,77 @@ terminal colorizing code, originally by Georg Brandl.
 
 import calendar
 import datetime
-import datetime as dt
 import importlib
+import inspect
 import logging
 import numbers
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+import os
+import warnings
+from collections.abc import Generator, Iterable, Sequence
 
-if TYPE_CHECKING:
-    from redis import Redis
-
-    from .queue import Queue
+# TODO: Change import path to "collections.abc" after we stop supporting Python 3.8
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Optional,
+    TypeVar,
+    Union,
+    overload,
+)
 
 from redis.exceptions import ResponseError
 
 from .exceptions import TimeoutFormatError
 
+if TYPE_CHECKING:
+    from redis import Redis
+
+    from .job import Job
+    from .queue import Queue
+    from .worker import Worker
+
+
+_T = TypeVar('_T')
+_O = TypeVar('_O', bound=object)
+ObjOrStr = Union[_O, str]
+
+
 logger = logging.getLogger(__name__)
 
 
-def compact(lst: List[Any]) -> List[Any]:
+def resolve_function_reference(func) -> tuple[Any, str]:
+    """Resolve a function reference into instance and function name components.
+
+    Args:
+        func: The function reference to resolve - can be a method, function,
+             builtin, string path, or callable class instance.
+
+    Returns:
+        A tuple of (instance, func_name) where:
+        - instance: The object instance (for methods/callable instances) or None
+        - func_name: The string representation of the function name/path
+
+    Raises:
+        TypeError: If func is not a valid callable or string reference.
+    """
+    if inspect.ismethod(func):
+        return func.__self__, func.__name__
+    elif inspect.isfunction(func) or inspect.isbuiltin(func):
+        return None, f'{func.__module__}.{func.__qualname__}'
+    elif isinstance(func, str):
+        return None, as_text(func)
+    elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
+        return func, '__call__'
+    else:
+        raise TypeError(f'Expected a callable or a string, but got: {func}')
+
+
+def compact(lst: Iterable[Optional[_T]]) -> list[_T]:
     """Excludes `None` values from a list-like object.
 
     Args:
-        lst (list): A list (or list-like) oject
+        lst (list): A list (or list-like) object
 
     Returns:
         object (list): The list without None values
@@ -58,17 +105,21 @@ def as_text(v: Union[bytes, str]) -> str:
         raise ValueError('Unknown type %r' % type(v))
 
 
-def decode_redis_hash(h) -> Dict[str, Any]:
+def decode_redis_hash(h: dict[Union[bytes, str], Any], *, decode_values: bool = False) -> dict[str, Any]:
     """Decodes the Redis hash, ensuring that keys are strings
     Most importantly, decodes bytes strings, ensuring the dict has str keys.
 
     Args:
         h (Dict[Any, Any]): The Redis hash
+        decode_values (bool): If True, also decode values to strings using as_text(). Defaults to False.
 
     Returns:
         Dict[str, Any]: The decoded Redis data (Dictionary)
+        When decode_values=True, returns Dict[str, str]
     """
-    return dict((as_text(k), h[k]) for k in h)
+    if decode_values:
+        return dict((as_text(k), as_text(v)) for k, v in h.items())
+    return dict((as_text(k), v) for k, v in h.items())
 
 
 def import_attribute(name: str) -> Callable[..., Any]:
@@ -104,9 +155,9 @@ def import_attribute(name: str) -> Callable[..., Any]:
     if module is None:
         # maybe it's a builtin
         try:
-            return __builtins__[name]
+            return __builtins__[name]  # type: ignore[index]
         except KeyError:
-            raise ValueError('Invalid attribute name: %s' % name)
+            raise ValueError(f'Invalid attribute name: {name}')
 
     attribute_name = '.'.join(attribute_bits)
     if hasattr(module, attribute_name):
@@ -124,7 +175,122 @@ def import_attribute(name: str) -> Callable[..., Any]:
     return getattr(attribute_owner, attribute_name)
 
 
-def now():
+def import_worker_class(name: str) -> type['Worker']:
+    """Import a worker class from a dotted path name."""
+    cls = import_attribute(name)
+
+    if not isinstance(cls, type):
+        raise ValueError(f'Invalid worker class: {name}')
+
+    from .worker import Worker
+
+    if not issubclass(cls, Worker):
+        raise ValueError(f'Invalid worker class: {name}')
+
+    return cls
+
+
+def import_job_class(name: str) -> type['Job']:
+    """Import a job class from a dotted path name."""
+    cls = import_attribute(name)
+
+    if not isinstance(cls, type):
+        raise ValueError(f'Invalid job class: {name}')
+
+    from .job import Job
+
+    if not issubclass(cls, Job):
+        raise ValueError(f'Invalid job class: {name}')
+
+    return cls
+
+
+def import_queue_class(name: str) -> type['Queue']:
+    """Import a queue class from a dotted path name."""
+    cls = import_attribute(name)
+
+    if not isinstance(cls, type):
+        raise ValueError(f'Invalid queue class: {name}')
+
+    from .queue import Queue
+
+    if not issubclass(cls, Queue):
+        raise ValueError(f'Invalid queue class: {name}')
+
+    return cls
+
+
+def normalize_config_path(config_path: str) -> str:
+    """Normalize configuration path to dotted module path format.
+
+    Converts file paths like 'directory/config_file.py' or 'directory.config_file'
+    to dotted module paths like 'directory.config_file' for use with importlib.import_module().
+
+    Args:
+        config_path: Either a file path (e.g., 'app/cron_config.py', 'app/cron_config')
+                    or a dotted module path (e.g., 'app.cron_config')
+
+    Returns:
+        A dotted module path suitable for importlib.import_module()
+
+    Examples:
+        normalize_config_path('app/cron_config.py') -> 'app.cron_config'
+        normalize_config_path('app/cron_config') -> 'app.cron_config'
+        normalize_config_path('app.cron_config') -> 'app.cron_config'
+        normalize_config_path('/abs/path/to/config.py') -> 'abs.path.to.config'
+    """
+    # Check if it's already a dotted path (no path separators and no .py extension)
+    is_file_path = os.path.sep in config_path or config_path.endswith('.py')
+
+    if not is_file_path:
+        # Already a dotted module path, return as-is
+        return config_path
+
+    # Convert file path to dotted module path
+    normalized = config_path
+
+    # Remove .py extension if present
+    if normalized.endswith('.py'):
+        normalized = normalized[:-3]
+
+    # Handle absolute paths by removing leading separator
+    if normalized.startswith(os.path.sep):
+        normalized = normalized[1:]
+
+    # Replace path separators with dots
+    normalized = normalized.replace(os.path.sep, '.')
+
+    return normalized
+
+
+def validate_absolute_path(file_path: str) -> str:
+    """Validate that an absolute file path exists and points to a file.
+
+    Args:
+        file_path: The absolute file path to validate
+
+    Returns:
+        The same file path if validation passes (for chaining)
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        IsADirectoryError: If the path points to a directory instead of a file
+
+    Examples:
+        validate_absolute_path('/path/to/config.py')  # Returns '/path/to/config.py'
+        validate_absolute_path('/path/to/missing.py')  # Raises FileNotFoundError
+        validate_absolute_path('/path/to/directory')   # Raises IsADirectoryError
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Configuration file not found at '{file_path}'")
+
+    if not os.path.isfile(file_path):
+        raise IsADirectoryError(f"Configuration path points to a directory, not a file: '{file_path}'")
+
+    return file_path
+
+
+def now() -> datetime.datetime:
     """Return now in UTC"""
     return datetime.datetime.now(datetime.timezone.utc)
 
@@ -132,64 +298,17 @@ def now():
 _TIMESTAMP_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
 
 
-def utcformat(dt: dt.datetime) -> str:
+def utcformat(dt: datetime.datetime) -> str:
     return dt.strftime(as_text(_TIMESTAMP_FORMAT))
 
 
-def utcparse(string: str) -> dt.datetime:
+def utcparse(string: str) -> datetime.datetime:
     try:
-        return datetime.datetime.strptime(string, _TIMESTAMP_FORMAT)
+        parsed = datetime.datetime.strptime(string, _TIMESTAMP_FORMAT)
     except ValueError:
         # This catches any jobs remain with old datetime format
-        try:
-            return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%S.%fZ')
-        except ValueError:
-            return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
-
-
-def first(iterable: Iterable, default=None, key=None):
-    """Return first element of `iterable` that evaluates true, else return None
-    (or an optional default value).
-
-    >>> first([0, False, None, [], (), 42])
-    42
-
-    >>> first([0, False, None, [], ()]) is None
-    True
-
-    >>> first([0, False, None, [], ()], default='ohai')
-    'ohai'
-
-    >>> import re
-    >>> m = first(re.match(regex, 'abc') for regex in ['b.*', 'a(.*)'])
-    >>> m.group(1)
-    'bc'
-
-    The optional `key` argument specifies a one-argument predicate function
-    like that used for `filter()`.  The `key` argument, if supplied, must be
-    in keyword form.  For example:
-
-    >>> first([1, 1, 3, 4, 5], key=lambda x: x % 2 == 0)
-    4
-
-    Args:
-        iterable (t.Iterable): _description_
-        default (_type_, optional): _description_. Defaults to None.
-        key (_type_, optional): _description_. Defaults to None.
-
-    Returns:
-        _type_: _description_
-    """
-    if key is None:
-        for el in iterable:
-            if el:
-                return el
-    else:
-        for el in iterable:
-            if key(el):
-                return el
-
-    return default
+        parsed = datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
+    return parsed.replace(tzinfo=datetime.timezone.utc)
 
 
 def is_nonstring_iterable(obj: Any) -> bool:
@@ -204,17 +323,31 @@ def is_nonstring_iterable(obj: Any) -> bool:
     return isinstance(obj, Iterable) and not isinstance(obj, str)
 
 
-def ensure_list(obj: Any) -> List:
-    """When passed an iterable of objects, does nothing, otherwise, it returns
+@overload
+def ensure_job_list(obj: str) -> list[str]: ...
+@overload
+def ensure_job_list(obj: 'Job') -> list['Job']: ...
+@overload
+def ensure_job_list(obj: Union['Job', str, Sequence[Union['Job', str]]]) -> list[Union['Job', str]]: ...
+@overload
+def ensure_job_list(obj: Iterable[_O]) -> list[_O]: ...
+@overload
+def ensure_job_list(obj: _O) -> list[_O]: ...
+
+
+def ensure_job_list(obj):
+    """When passed an iterable of objects, convert to list, otherwise, it returns
     a list with just that object in it.
 
     Args:
         obj (Any): _description_
 
-    Returns:
+    returns:
         List: _description_
     """
-    return obj if is_nonstring_iterable(obj) else [obj]
+    # Note: To reuse is_nonstring_iterable, we need TypeGuard of Python 3.10+,
+    # but we are dragged by Python 3.8.
+    return list(obj) if isinstance(obj, Iterable) and not isinstance(obj, str) else [obj]
 
 
 def current_timestamp() -> int:
@@ -223,10 +356,10 @@ def current_timestamp() -> int:
     Returns:
         int: _description_
     """
-    return calendar.timegm(datetime.datetime.now(datetime.timezone.utc).utctimetuple())
+    return calendar.timegm(now().utctimetuple())
 
 
-def backend_class(holder, default_name, override=None) -> TypeVar('T'):
+def backend_class(holder, default_name, override=None) -> type:
     """Get a backend class using its default attribute name or an override
 
     Args:
@@ -240,16 +373,19 @@ def backend_class(holder, default_name, override=None) -> TypeVar('T'):
     if override is None:
         return getattr(holder, default_name)
     elif isinstance(override, str):
-        return import_attribute(override)
+        return import_attribute(override)  # type: ignore[return-value]
     else:
         return override
 
 
-def str_to_date(date_str: Optional[str]) -> Union[dt.datetime, Any]:
+def str_to_date(date_str: Union[bytes, str]) -> datetime.datetime:
     if not date_str:
-        return
+        raise ValueError('Empty string or bytestring provided')
     else:
-        return utcparse(date_str.decode())
+        if isinstance(date_str, bytes):
+            return utcparse(date_str.decode())
+        else:
+            return utcparse(date_str)
 
 
 def parse_timeout(timeout: Optional[Union[int, float, str]]) -> Optional[int]:
@@ -257,7 +393,9 @@ def parse_timeout(timeout: Optional[Union[int, float, str]]) -> Optional[int]:
     if not isinstance(timeout, numbers.Integral) and timeout is not None:
         try:
             timeout = int(timeout)
+            return timeout
         except ValueError:
+            assert isinstance(timeout, str)
             digit, unit = timeout[:-1], (timeout[-1:]).lower()
             unit_second = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
             try:
@@ -269,10 +407,10 @@ def parse_timeout(timeout: Optional[Union[int, float, str]]) -> Optional[int]:
                     'such as "1h", "23m".'
                 )
 
-    return timeout
+    return int(timeout) if timeout is not None else None
 
 
-def get_version(connection: 'Redis') -> Tuple[int, int, int]:
+def get_version(connection: 'Redis') -> tuple[int, int, int]:
     """
     Returns tuple of Redis server version.
     This function also correctly handles 4 digit redis server versions.
@@ -285,13 +423,19 @@ def get_version(connection: 'Redis') -> Tuple[int, int, int]:
     """
     try:
         # Getting the connection info for each job tanks performance, we can cache it on the connection object
-        if not getattr(connection, "__rq_redis_server_version", None):
+        if not getattr(connection, '__rq_redis_server_version', None):
+            # Cast the version string to a tuple of integers. Some Redis implementations may return a float.
+            version_str = str(connection.info('server')['redis_version'])
+            version_parts = [int(i) for i in version_str.split('.')[:3]]
+            # Ensure the version tuple has exactly three elements
+            while len(version_parts) < 3:
+                version_parts.append(0)
             setattr(
                 connection,
-                "__rq_redis_server_version",
-                tuple(int(i) for i in str(connection.info("server")["redis_version"]).split('.')[:3]),
+                '__rq_redis_server_version',
+                tuple(version_parts),
             )
-        return getattr(connection, "__rq_redis_server_version")
+        return getattr(connection, '__rq_redis_server_version')
     except ResponseError:  # fakeredis doesn't implement Redis' INFO command
         return (5, 0, 9)
 
@@ -309,11 +453,11 @@ def ceildiv(a, b):
     return -(-a // b)
 
 
-def split_list(a_list: List[Any], segment_size: int):
+def split_list(a_list: Sequence[_T], segment_size: int) -> Generator[Sequence[_T], None, None]:
     """Splits a list into multiple smaller lists having size `segment_size`
 
     Args:
-        a_list (List[Any]): A list to split
+        a_list (Sequence[Any]): A sequence to split
         segment_size (int): The segment size to split into
 
     Yields:
@@ -339,7 +483,7 @@ def truncate_long_string(data: str, max_length: Optional[int] = None) -> str:
 
 
 def get_call_string(
-    func_name: Optional[str], args: Any, kwargs: Dict[Any, Any], max_length: Optional[int] = None
+    func_name: Optional[str], args: Any, kwargs: dict[Any, Any], max_length: Optional[int] = None
 ) -> Optional[str]:
     """
     Returns a string representation of the call, formatted as a regular
@@ -347,28 +491,28 @@ def get_call_string(
     arguments with representation longer than max_length.
 
     Args:
-        func_name (str): The funtion name
+        func_name (str): The function name
         args (Any): The function arguments
         kwargs (Dict[Any, Any]): The function kwargs
         max_length (int, optional): The max length. Defaults to None.
 
     Returns:
-        str: A String representation of the function call.
+        str: A string representation of the function call.
     """
     if func_name is None:
         return None
 
     arg_list = [as_text(truncate_long_string(repr(arg), max_length)) for arg in args]
 
-    list_kwargs = ['{0}={1}'.format(k, as_text(truncate_long_string(repr(v), max_length))) for k, v in kwargs.items()]
+    list_kwargs = [f'{k}={as_text(truncate_long_string(repr(v), max_length))}' for k, v in kwargs.items()]
     arg_list += sorted(list_kwargs)
     args = ', '.join(arg_list)
 
-    return '{0}({1})'.format(func_name, args)
+    return f'{func_name}({args})'
 
 
-def parse_names(queues_or_names: List[Union[str, 'Queue']]) -> List[str]:
-    """Given a list of strings or queues, returns queue names"""
+def parse_names(queues_or_names: Iterable[Union[str, 'Queue']]) -> list[str]:
+    """Given a iterable  of strings or queues, returns queue names"""
     from .queue import Queue
 
     names = []
@@ -380,7 +524,7 @@ def parse_names(queues_or_names: List[Union[str, 'Queue']]) -> List[str]:
     return names
 
 
-def get_connection_from_queues(queues_or_names: List[Union[str, 'Queue']]) -> Optional['Redis']:
+def get_connection_from_queues(queues_or_names: Iterable[Union[str, 'Queue']]) -> Optional['Redis']:
     """Given a list of strings or queues, returns a connection"""
     from .queue import Queue
 
@@ -388,3 +532,26 @@ def get_connection_from_queues(queues_or_names: List[Union[str, 'Queue']]) -> Op
         if isinstance(queue_or_name, Queue):
             return queue_or_name.connection
     return None
+
+
+def parse_composite_key(composite_key: str) -> tuple[str, str]:
+    """Method returns a parsed composite key.
+
+    Args:
+        composite_key (str): the composite key to parse
+
+    Returns:
+        tuple[str, str]: tuple of job id and the execution id
+    """
+    result = composite_key.split(':')
+    if len(result) == 1:
+        # StartedJobRegistry contains a composite key under the sorted set
+        # a single job_id should've never ended up in the set, but
+        # just in case there's a regression (tests don't show any)
+        warnings.warn(
+            f'Composite key must contain job_id:execution_id, got {composite_key}',
+            DeprecationWarning,
+        )
+        return (result[0], '')
+    job_id, execution_id = result
+    return (job_id, execution_id)

@@ -4,9 +4,19 @@ import traceback
 import uuid
 import warnings
 from collections import namedtuple
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable, Sequence
+from datetime import datetime, timedelta
 from functools import total_ordering
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
+
+# TODO: Change import path to "collections.abc" after we stop supporting Python 3.8
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Optional,
+    Union,
+    cast,
+)
 
 from redis import WatchError
 
@@ -24,33 +34,35 @@ from .exceptions import DequeueTimeout, NoSuchJobError
 from .intermediate_queue import IntermediateQueue
 from .job import Callback, Job, JobStatus
 from .logutils import blue, green
-from .serializers import resolve_serializer
+from .repeat import Repeat
+from .serializers import Serializer, resolve_serializer
 from .types import FunctionReferenceType, JobDependencyType
 from .utils import as_text, backend_class, compact, get_version, import_attribute, now, parse_timeout
 
-logger = logging.getLogger("rq.queue")
+logger = logging.getLogger('rq.queue')
 
 
 class EnqueueData(
     namedtuple(
         'EnqueueData',
         [
-            "func",
-            "args",
-            "kwargs",
-            "timeout",
-            "result_ttl",
-            "ttl",
-            "failure_ttl",
-            "description",
-            "depends_on",
-            "job_id",
-            "at_front",
-            "meta",
-            "retry",
-            "on_success",
-            "on_failure",
-            "on_stopped",
+            'func',
+            'args',
+            'kwargs',
+            'timeout',
+            'result_ttl',
+            'ttl',
+            'failure_ttl',
+            'description',
+            'depends_on',
+            'job_id',
+            'at_front',
+            'meta',
+            'retry',
+            'on_success',
+            'on_failure',
+            'on_stopped',
+            'repeat',
         ],
     )
 ):
@@ -63,8 +75,8 @@ class EnqueueData(
 
 @total_ordering
 class Queue:
-    job_class: Type['Job'] = Job
-    death_penalty_class: Type[BaseDeathPenalty] = UnixSignalDeathPenalty
+    job_class: type['Job'] = Job
+    death_penalty_class: type[BaseDeathPenalty] = UnixSignalDeathPenalty
     DEFAULT_TIMEOUT: int = 180  # Default timeout seconds.
     redis_queue_namespace_prefix: str = 'rq:queue:'
     redis_queues_keys: str = 'rq:queues'
@@ -73,10 +85,10 @@ class Queue:
     def all(
         cls,
         connection: 'Redis',
-        job_class: Optional[Type['Job']] = None,
+        job_class: Optional[type['Job']] = None,
         serializer=None,
-        death_penalty_class: Optional[Type[BaseDeathPenalty]] = None,
-    ) -> List['Queue']:
+        death_penalty_class: Optional[type[BaseDeathPenalty]] = None,
+    ) -> list['Queue']:
         """Returns an iterable of all Queues.
 
         Args:
@@ -98,8 +110,8 @@ class Queue:
                 death_penalty_class=death_penalty_class,
             )
 
-        all_registerd_queues = connection.smembers(cls.redis_queues_keys)
-        all_queues = [to_queue(rq_key) for rq_key in all_registerd_queues if rq_key]
+        all_registered_queues = connection.smembers(cls.redis_queues_keys)
+        all_queues = [to_queue(rq_key) for rq_key in all_registered_queues if rq_key]
         return all_queues
 
     @classmethod
@@ -107,9 +119,9 @@ class Queue:
         cls,
         queue_key: str,
         connection: 'Redis',
-        job_class: Optional[Type['Job']] = None,
-        serializer: Any = None,
-        death_penalty_class: Optional[Type[BaseDeathPenalty]] = None,
+        job_class: Optional[type['Job']] = None,
+        serializer: Optional[Union[Serializer, str]] = None,
+        death_penalty_class: Optional[type[BaseDeathPenalty]] = None,
     ) -> 'Queue':
         """Returns a Queue instance, based on the naming conventions for naming
         the internal Redis keys.  Can be used to reverse-lookup Queues by their
@@ -119,7 +131,7 @@ class Queue:
             queue_key (str): The queue key
             connection (Redis): Redis connection. Defaults to None.
             job_class (Optional[Job], optional): Job class. Defaults to None.
-            serializer (Any, optional): Serializer. Defaults to None.
+            serializer (Optional[Union[Serializer, str]], optional): Serializer. Defaults to None.
             death_penalty_class (Optional[BaseDeathPenalty], optional): Death penalty class. Defaults to None.
 
         Raises:
@@ -130,7 +142,7 @@ class Queue:
         """
         prefix = cls.redis_queue_namespace_prefix
         if not queue_key.startswith(prefix):
-            raise ValueError('Not a valid RQ queue key: {0}'.format(queue_key))
+            raise ValueError(f'Not a valid RQ queue key: {queue_key}')
         name = queue_key[len(prefix) :]
         return cls(
             name,
@@ -143,12 +155,12 @@ class Queue:
     def __init__(
         self,
         name: str = 'default',
-        connection: 'Redis' = None,
+        connection: Optional['Redis'] = None,
         default_timeout: Optional[int] = None,
         is_async: bool = True,
-        job_class: Optional[Union[str, Type['Job']]] = None,
-        serializer: Any = None,
-        death_penalty_class: Optional[Type[BaseDeathPenalty]] = UnixSignalDeathPenalty,
+        job_class: Optional[Union[str, type['Job']]] = None,
+        serializer: Optional[Union[Serializer, str]] = None,
+        death_penalty_class: Optional[type[BaseDeathPenalty]] = UnixSignalDeathPenalty,
         **kwargs,
     ):
         """Initializes a Queue object.
@@ -161,7 +173,7 @@ class Queue:
                 If `is_async` is false, jobs will run on the same process from where it was called. Defaults to True.
             job_class (Union[str, 'Job', optional): Job class or a string referencing the Job class path.
                 Defaults to None.
-            serializer (Any, optional): Serializer. Defaults to None.
+            serializer (Optional[Union[Serializer, str]], optional): Serializer. Defaults to None.
             death_penalty_class (Type[BaseDeathPenalty, optional): Job class or a string referencing the Job class path.
                 Defaults to UnixSignalDeathPenalty.
         """
@@ -170,7 +182,7 @@ class Queue:
         self.connection = connection
         prefix = self.redis_queue_namespace_prefix
         self.name = name
-        self._key = '{0}{1}'.format(prefix, name)
+        self._key = f'{prefix}{name}'
         self._default_timeout = parse_timeout(default_timeout) or self.DEFAULT_TIMEOUT
         self._is_async = is_async
         self.log = logger
@@ -182,12 +194,13 @@ class Queue:
         # override class attribute job_class if one was passed
         if job_class is not None:
             if isinstance(job_class, str):
-                job_class = import_attribute(job_class)
-            self.job_class = job_class
-        self.death_penalty_class = death_penalty_class  # type: ignore
+                self.job_class = import_attribute(job_class)  # type: ignore[assignment]
+            else:
+                self.job_class = job_class
+        self.death_penalty_class = death_penalty_class  # type: ignore[assignment]
 
         self.serializer = resolve_serializer(serializer)
-        self.redis_server_version: Optional[Tuple[int, int, int]] = None
+        self.redis_server_version: Optional[tuple[int, int, int]] = None
 
     def __len__(self):
         return self.count
@@ -198,7 +211,7 @@ class Queue:
     def __iter__(self):
         yield self
 
-    def get_redis_server_version(self) -> Tuple[int, int, int]:
+    def get_redis_server_version(self) -> tuple[int, int, int]:
         """Return Redis server version of connection
 
         Returns:
@@ -229,7 +242,7 @@ class Queue:
         return 'rq:clean_registries:%s' % self.name
 
     @property
-    def scheduler_pid(self) -> int:
+    def scheduler_pid(self) -> Optional[int]:
         from rq.scheduler import RQScheduler
 
         pid = self.connection.get(RQScheduler.get_locking_key(self.name))
@@ -261,8 +274,8 @@ class Queue:
         Returns:
             script (...): The Lua Script is called.
         """
-        script = """
-            local prefix = "{0}"
+        script = f"""
+            local prefix = "{self.job_class.redis_job_namespace_prefix}"
             local q = KEYS[1]
             local count = 0
             while true do
@@ -277,11 +290,7 @@ class Queue:
                 count = count + 1
             end
             return count
-        """.format(
-            self.job_class.redis_job_namespace_prefix
-        ).encode(
-            "utf-8"
-        )
+        """.encode()
         script = self.connection.register_script(script)
         return script(keys=[self.key])
 
@@ -331,6 +340,8 @@ class Queue:
             if job.origin == self.name:
                 return job
 
+        return None
+
     def get_job_position(self, job_or_id: Union['Job', str]) -> Optional[int]:
         """Returns the position of a job within the queue
 
@@ -345,7 +356,7 @@ class Queue:
         Returns:
             _type_: _description_
         """
-        job_id = job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id
+        job_id = cast(str, job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id)
 
         if self.get_redis_server_version() >= (6, 0, 6):
             try:
@@ -358,7 +369,7 @@ class Queue:
             return self.job_ids.index(job_id)
         return None
 
-    def get_job_ids(self, offset: int = 0, length: int = -1) -> List[str]:
+    def get_job_ids(self, offset: int = 0, length: int = -1) -> list[str]:
         """Returns a slice of job IDs in the queue.
 
         Args:
@@ -377,7 +388,7 @@ class Queue:
         self.log.debug('Getting jobs for queue %s: %d found.', green(self.name), len(job_ids))
         return job_ids
 
-    def get_jobs(self, offset: int = 0, length: int = -1) -> List['Job']:
+    def get_jobs(self, offset: int = 0, length: int = -1) -> list['Job']:
         """Returns a slice of jobs in the queue.
 
         Args:
@@ -391,12 +402,12 @@ class Queue:
         return compact([self.fetch_job(job_id) for job_id in job_ids])
 
     @property
-    def job_ids(self) -> List[str]:
+    def job_ids(self) -> list[str]:
         """Returns a list of all job IDS in the queue."""
         return self.get_job_ids()
 
     @property
-    def jobs(self) -> List['Job']:
+    def jobs(self) -> list['Job']:
         """Returns a list of all (valid) jobs in the queue."""
         return self.get_jobs()
 
@@ -424,7 +435,7 @@ class Queue:
         """Returns this queue's FinishedJobRegistry."""
         from rq.registry import FinishedJobRegistry
 
-        # TODO: Why was job_class only ommited here before?  Was it intentional?
+        # TODO: Why was job_class only omitted here before?  Was it intentional?
         return FinishedJobRegistry(queue=self, job_class=self.job_class, serializer=self.serializer)
 
     @property
@@ -458,7 +469,7 @@ class Queue:
         Returns:
             _type_: _description_
         """
-        job_id: str = job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id
+        job_id = cast(str, job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id)
 
         if pipeline is not None:
             return pipeline.lrem(self.key, 1, job_id)
@@ -500,8 +511,8 @@ class Queue:
     def create_job(
         self,
         func: 'FunctionReferenceType',
-        args: Union[Tuple, List, None] = None,
-        kwargs: Optional[Dict] = None,
+        args: Union[tuple, list, None] = None,
+        kwargs: Optional[dict] = None,
         timeout: Optional[int] = None,
         result_ttl: Optional[int] = None,
         ttl: Optional[int] = None,
@@ -509,9 +520,10 @@ class Queue:
         description: Optional[str] = None,
         depends_on: Optional['JobDependencyType'] = None,
         job_id: Optional[str] = None,
-        meta: Optional[Dict] = None,
+        meta: Optional[dict] = None,
         status: JobStatus = JobStatus.QUEUED,
         retry: Optional['Retry'] = None,
+        repeat: Optional['Repeat'] = None,
         *,
         on_success: Optional[Union[Callback, Callable]] = None,
         on_failure: Optional[Union[Callback, Callable]] = None,
@@ -521,7 +533,7 @@ class Queue:
         """Creates a job based on parameters given
 
         Args:
-            func (FunctionReferenceType): The function referce: a callable or the path.
+            func (FunctionReferenceType): The function reference: a callable or the path.
             args (Union[Tuple, List, None], optional): The `*args` to pass to the function. Defaults to None.
             kwargs (Optional[Dict], optional): The `**kwargs` to pass to the function. Defaults to None.
             timeout (Optional[int], optional): Function timeout. Defaults to None, use -1 for infinite timeout.
@@ -534,6 +546,7 @@ class Queue:
             meta (Optional[Dict], optional): Job metadata. Defaults to None.
             status (JobStatus, optional): Job status. Defaults to JobStatus.QUEUED.
             retry (Optional[Retry], optional): The Retry Object. Defaults to None.
+            repeat (Optional[Repeat], optional): The Repeat Object. Defaults to None.
             on_success (Optional[Union[Callback, Callable[..., Any]]], optional): Callback for on success. Defaults to
                 None. Callable is deprecated.
             on_failure (Optional[Union[Callback, Callable[..., Any]]], optional): Callback for on failure. Defaults to
@@ -589,6 +602,10 @@ class Queue:
         if retry:
             job.retries_left = retry.max
             job.retry_intervals = retry.intervals
+
+        if repeat:
+            job.repeats_left = repeat.times
+            job.repeat_intervals = repeat.intervals
 
         return job
 
@@ -646,14 +663,16 @@ class Queue:
                         # if pipeline comes from caller, re-raise to them
                         raise
         elif pipeline is not None:
-            pipeline.multi()  # Ensure pipeline in multi mode before returning to caller
+            # Ensure pipeline in multi mode before returning to caller (if not set before)
+            if not pipeline.explicit_transaction:
+                pipeline.multi()
         return job
 
     def enqueue_call(
         self,
         func: 'FunctionReferenceType',
-        args: Union[Tuple, List, None] = None,
-        kwargs: Optional[Dict] = None,
+        args: Union[tuple, list, None] = None,
+        kwargs: Optional[dict] = None,
         timeout: Optional[int] = None,
         result_ttl: Optional[int] = None,
         ttl: Optional[int] = None,
@@ -662,8 +681,9 @@ class Queue:
         depends_on: Optional['JobDependencyType'] = None,
         job_id: Optional[str] = None,
         at_front: bool = False,
-        meta: Optional[Dict] = None,
+        meta: Optional[dict] = None,
         retry: Optional['Retry'] = None,
+        repeat: Optional['Repeat'] = None,
         on_success: Optional[Union[Callback, Callable[..., Any]]] = None,
         on_failure: Optional[Union[Callback, Callable[..., Any]]] = None,
         on_stopped: Optional[Union[Callback, Callable[..., Any]]] = None,
@@ -677,8 +697,8 @@ class Queue:
 
         Args:
             func (FunctionReferenceType): The reference to the function
-            args (Union[Tuple, List, None], optional): THe `*args` to pass to the function. Defaults to None.
-            kwargs (Optional[Dict], optional): THe `**kwargs` to pass to the function. Defaults to None.
+            args (Union[Tuple, List, None], optional): The `*args` to pass to the function. Defaults to None.
+            kwargs (Optional[Dict], optional): The `**kwargs` to pass to the function. Defaults to None.
             timeout (Optional[int], optional): Function timeout. Defaults to None.
             result_ttl (Optional[int], optional): Result time to live. Defaults to None.
             ttl (Optional[int], optional): Time to live. Defaults to None.
@@ -715,6 +735,7 @@ class Queue:
             status=JobStatus.QUEUED,
             timeout=timeout,
             retry=retry,
+            repeat=repeat,
             on_success=on_success,
             on_failure=on_failure,
             on_stopped=on_stopped,
@@ -724,29 +745,30 @@ class Queue:
     @staticmethod
     def prepare_data(
         func: 'FunctionReferenceType',
-        args: Union[Tuple, List, None] = None,
-        kwargs: Optional[Dict] = None,
+        args: Union[tuple, list, None] = None,
+        kwargs: Optional[dict] = None,
         timeout: Optional[int] = None,
         result_ttl: Optional[int] = None,
         ttl: Optional[int] = None,
         failure_ttl: Optional[int] = None,
         description: Optional[str] = None,
-        depends_on: Optional[List] = None,
+        depends_on: Optional['JobDependencyType'] = None,
         job_id: Optional[str] = None,
         at_front: bool = False,
-        meta: Optional[Dict] = None,
+        meta: Optional[dict] = None,
         retry: Optional['Retry'] = None,
         on_success: Optional[Union[Callback, Callable]] = None,
         on_failure: Optional[Union[Callback, Callable]] = None,
         on_stopped: Optional[Union[Callback, Callable]] = None,
+        repeat: Optional['Repeat'] = None,
     ) -> EnqueueData:
         """Need this till support dropped for python_version < 3.7, where defaults can be specified for named tuples
         And can keep this logic within EnqueueData
 
         Args:
             func (FunctionReferenceType): The reference to the function
-            args (Union[Tuple, List, None], optional): THe `*args` to pass to the function. Defaults to None.
-            kwargs (Optional[Dict], optional): THe `**kwargs` to pass to the function. Defaults to None.
+            args (Union[Tuple, List, None], optional): The `*args` to pass to the function. Defaults to None.
+            kwargs (Optional[Dict], optional): The `**kwargs` to pass to the function. Defaults to None.
             timeout (Optional[int], optional): Function timeout. Defaults to None.
             result_ttl (Optional[int], optional): Result time to live. Defaults to None.
             ttl (Optional[int], optional): Time to live. Defaults to None.
@@ -763,6 +785,7 @@ class Queue:
                 None. Callable is deprecated.
             on_stopped (Optional[Union[Callback, Callable[..., Any]]], optional): Callback for on stopped. Defaults to
                 None. Callable is deprecated.
+            repeat (Optional[Repeat], optional): Repeat object. Defaults to None.
 
         Returns:
             EnqueueData: The EnqueueData
@@ -784,11 +807,12 @@ class Queue:
             on_success,
             on_failure,
             on_stopped,
+            repeat,
         )
 
     def enqueue_many(
-        self, job_datas: List['EnqueueData'], pipeline: Optional['Pipeline'] = None, group_id: str = None
-    ) -> List[Job]:
+        self, job_datas: Iterable['EnqueueData'], pipeline: Optional['Pipeline'] = None, group_id: Optional[str] = None
+    ) -> list[Job]:
         """Creates multiple jobs (created via `Queue.prepare_data` calls)
         to represent the delayed function calls and enqueues them.
 
@@ -800,29 +824,34 @@ class Queue:
             List[Job]: A list of enqueued jobs
         """
         pipe = pipeline if pipeline is not None else self.connection.pipeline()
+
+        # Add Queue key set
+        pipe.sadd(self.redis_queues_keys, self.key)
+
         jobs_without_dependencies = []
         jobs_with_unmet_dependencies = []
         jobs_with_met_dependencies = []
 
         def get_job_kwargs(job_data, initial_status):
             return {
-                "func": job_data.func,
-                "args": job_data.args,
-                "kwargs": job_data.kwargs,
-                "result_ttl": job_data.result_ttl,
-                "ttl": job_data.ttl,
-                "failure_ttl": job_data.failure_ttl,
-                "description": job_data.description,
-                "depends_on": job_data.depends_on,
-                "job_id": job_data.job_id,
-                "meta": job_data.meta,
-                "status": initial_status,
-                "timeout": job_data.timeout,
-                "retry": job_data.retry,
-                "on_success": job_data.on_success,
-                "on_failure": job_data.on_failure,
-                "on_stopped": job_data.on_stopped,
-                "group_id": group_id,
+                'func': job_data.func,
+                'args': job_data.args,
+                'kwargs': job_data.kwargs,
+                'result_ttl': job_data.result_ttl,
+                'ttl': job_data.ttl,
+                'failure_ttl': job_data.failure_ttl,
+                'description': job_data.description,
+                'depends_on': job_data.depends_on,
+                'job_id': job_data.job_id,
+                'meta': job_data.meta,
+                'status': initial_status,
+                'timeout': job_data.timeout,
+                'retry': job_data.retry,
+                'on_success': job_data.on_success,
+                'on_failure': job_data.on_failure,
+                'on_stopped': job_data.on_stopped,
+                'group_id': group_id,
+                'repeat': job_data.repeat,
             }
 
         # Enqueue jobs without dependencies
@@ -874,9 +903,10 @@ class Queue:
             Job: _description_
         """
         job.perform()
+        job.ended_at = now()
         result_ttl = job.get_result_ttl(default_ttl=DEFAULT_RESULT_TTL)
         with self.connection.pipeline() as pipeline:
-            job._handle_success(result_ttl=result_ttl, pipeline=pipeline)
+            job._handle_success(result_ttl=result_ttl, pipeline=pipeline, worker_name='')
             job.cleanup(result_ttl, pipeline=pipeline)
             pipeline.execute()
         return job
@@ -896,7 +926,7 @@ class Queue:
         Args:
             f (FunctionReferenceType): The function reference
             args (*args): function args
-            kwargs (*kwargs): function kargs
+            kwargs (**kwargs): function kwargs
         """
         if not isinstance(f, str) and f.__module__ == '__main__':
             raise ValueError('Functions from the __main__ module cannot be processed by workers')
@@ -913,6 +943,7 @@ class Queue:
         at_front = kwargs.pop('at_front', False)
         meta = kwargs.pop('meta', None)
         retry = kwargs.pop('retry', None)
+        repeat = kwargs.pop('repeat', None)
         on_success = kwargs.pop('on_success', None)
         on_failure = kwargs.pop('on_failure', None)
         on_stopped = kwargs.pop('on_stopped', None)
@@ -935,6 +966,7 @@ class Queue:
             at_front,
             meta,
             retry,
+            repeat,
             on_success,
             on_failure,
             on_stopped,
@@ -950,7 +982,7 @@ class Queue:
         Args:
             f (FunctionReferenceType): The function reference
             args (*args): function args
-            kwargs (*kwargs): function kargs
+            kwargs (**kwargs): function kwargs
 
         Returns:
             job (Job): The created Job
@@ -967,6 +999,7 @@ class Queue:
             at_front,
             meta,
             retry,
+            repeat,
             on_success,
             on_failure,
             on_stopped,
@@ -989,6 +1022,7 @@ class Queue:
             at_front=at_front,
             meta=meta,
             retry=retry,
+            repeat=repeat,
             on_success=on_success,
             on_failure=on_failure,
             on_stopped=on_stopped,
@@ -1017,6 +1051,7 @@ class Queue:
             at_front,
             meta,
             retry,
+            repeat,
             on_success,
             on_failure,
             on_stopped,
@@ -1038,6 +1073,7 @@ class Queue:
             job_id=job_id,
             meta=meta,
             retry=retry,
+            repeat=repeat,
             on_success=on_success,
             on_failure=on_failure,
             on_stopped=on_stopped,
@@ -1081,7 +1117,7 @@ class Queue:
         Returns:
             job (Job): The enqueued Job
         """
-        return self.enqueue_at(datetime.now(timezone.utc) + time_delta, func, *args, **kwargs)
+        return self.enqueue_at(now() + time_delta, func, *args, **kwargs)
 
     def enqueue_job(self, job: 'Job', pipeline: Optional['Pipeline'] = None, at_front: bool = False) -> Job:
         """Enqueues a job for delayed execution checking dependencies.
@@ -1092,7 +1128,7 @@ class Queue:
             at_front (bool, optional): Whether should enqueue at the front of the queue. Defaults to False.
 
         Returns:
-            Job: The enqued job
+            Job: The enqueued job
         """
         job.origin = self.name
         job = self.setup_dependencies(job, pipeline=pipeline)
@@ -1117,8 +1153,10 @@ class Queue:
             at_front (bool, optional): Whether should enqueue at the front of the queue. Defaults to False.
 
         Returns:
-            Job: The enqued job
+            Job: The enqueued job
         """
+        self.log.debug('Enqueueing job %s to queue %s (at_front=%s)', job.id, self.name, at_front)
+
         pipe = pipeline if pipeline is not None else self.connection.pipeline()
 
         job.redis_server_version = self.get_redis_server_version()
@@ -1161,19 +1199,23 @@ class Queue:
             with self.connection.pipeline() as pipeline:
                 job.set_status(JobStatus.FAILED, pipeline=pipeline)
                 exc_string = ''.join(traceback.format_exception(*sys.exc_info()))
-                job._handle_failure(exc_string, pipeline)
+                job._handle_failure(exc_string, pipeline, worker_name='')
                 pipeline.execute()
 
             if job.failure_callback:
-                job.failure_callback(job, self.connection, *sys.exc_info())  # type: ignore
+                job.failure_callback(job, self.connection, *sys.exc_info())
         else:
             if job.success_callback:
-                job.success_callback(job, self.connection, job.return_value())  # type: ignore
+                job.success_callback(job, self.connection, job.return_value())
 
         return job
 
     def enqueue_dependents(
-        self, job: 'Job', pipeline: Optional['Pipeline'] = None, exclude_job_id: Optional[str] = None
+        self,
+        job: 'Job',
+        pipeline: Optional['Pipeline'] = None,
+        exclude_job_id: Optional[str] = None,
+        refresh_job_status: bool = True,
     ):
         """Enqueues all jobs in the given job's dependents set and clears it.
 
@@ -1185,6 +1227,7 @@ class Queue:
             job (Job): The Job to enqueue the dependents
             pipeline (Optional[Pipeline], optional): The Redis Pipeline. Defaults to None.
             exclude_job_id (Optional[str], optional): Whether to exclude the job id. Defaults to None.
+            refresh_job_status (bool): whether to refresh job status when checking for dependencies. Defaults to True.
         """
         from .registry import DeferredJobRegistry
 
@@ -1198,7 +1241,7 @@ class Queue:
                 if pipeline is None:
                     pipe.watch(dependents_key)
 
-                dependent_job_ids = {as_text(_id) for _id in pipe.smembers(dependents_key)}
+                dependent_job_ids = {as_text(_id) for _id in pipe.smembers(dependents_key)}  # type: ignore[attr-defined]
 
                 # There's no dependents
                 if not dependent_job_ids:
@@ -1214,6 +1257,7 @@ class Queue:
                         parent_job=job,
                         pipeline=pipe,
                         exclude_job_id=exclude_job_id,
+                        refresh_job_status=refresh_job_status,
                     )
                     and dependent_job.get_status(refresh=False) != JobStatus.CANCELED
                 ]
@@ -1223,6 +1267,13 @@ class Queue:
                 if not jobs_to_enqueue:
                     break
 
+                self.log.debug(
+                    'Enqueueing %d dependent jobs for job %s: %s',
+                    len(jobs_to_enqueue),
+                    job.id,
+                    [j.id for j in jobs_to_enqueue],
+                )
+
                 for dependent in jobs_to_enqueue:
                     enqueue_at_front = dependent.enqueue_at_front or False
 
@@ -1230,10 +1281,23 @@ class Queue:
                         dependent.origin, self.connection, job_class=self.job_class, serializer=self.serializer
                     )
                     registry.remove(dependent, pipeline=pipe)
+                    self.log.debug('Removed job %s from DeferredJobRegistry', dependent.id)
 
                     if dependent.origin == self.name:
+                        self.log.debug(
+                            'Enqueueing job %s to current queue %s (at_front=%s)',
+                            dependent.id,
+                            self.name,
+                            enqueue_at_front,
+                        )
                         self._enqueue_job(dependent, pipeline=pipe, at_front=enqueue_at_front)
                     else:
+                        self.log.debug(
+                            'Enqueueing job %s to different queue %s (at_front=%s)',
+                            dependent.id,
+                            dependent.origin,
+                            enqueue_at_front,
+                        )
                         queue = self.__class__(name=dependent.origin, connection=self.connection)
                         queue._enqueue_job(dependent, pipeline=pipe, at_front=enqueue_at_front)
 
@@ -1264,8 +1328,10 @@ class Queue:
         """
         return as_text(self.connection.lpop(self.key))
 
+    # The queue_keys type is Sequence[str] instead of Iterable[str]
+    # because we loop over it twice, and we don't want user to pass a generator.
     @classmethod
-    def lpop(cls, queue_keys: List[str], timeout: Optional[int], connection: Optional['Redis'] = None):
+    def lpop(cls, queue_keys: Sequence[str], timeout: Optional[int], connection: Optional['Redis'] = None):
         """Helper method to abstract away from some Redis API details
         where LPOP accepts only a single key, whereas BLPOP
         accepts multiple.  So if we want the non-blocking LPOP, we need to
@@ -1279,7 +1345,7 @@ class Queue:
              > 0 - maximum number of seconds to block
 
         Args:
-            queue_keys (_type_): _description_
+            queue_keys (Sequence[str]): _description_
             timeout (Optional[int]): _description_
             connection (Optional[Redis], optional): _description_. Defaults to None.
 
@@ -1294,15 +1360,17 @@ class Queue:
             if timeout == 0:
                 raise ValueError('RQ does not support indefinite timeouts. Please pick a timeout value > 0')
             colored_queues = ', '.join(map(str, [green(str(queue)) for queue in queue_keys]))
-            logger.debug(f"Starting BLPOP operation for queues {colored_queues} with timeout of {timeout}")
+            logger.debug('Starting BLPOP operation for queues %s with timeout of %d', colored_queues, timeout)
+            assert connection
             result = connection.blpop(queue_keys, timeout)
             if result is None:
-                logger.debug(f"BLPOP timeout, no jobs found on queues {colored_queues}")
+                logger.debug('BLPOP timeout, no jobs found on queues %s', colored_queues)
                 raise DequeueTimeout(timeout, queue_keys)
             queue_key, job_id = result
             return queue_key, job_id
         else:  # non-blocking variant
             for queue_key in queue_keys:
+                assert connection
                 blob = connection.lpop(queue_key)
                 if blob is not None:
                     return queue_key, blob
@@ -1318,14 +1386,14 @@ class Queue:
             if timeout == 0:
                 raise ValueError('RQ does not support indefinite timeouts. Please pick a timeout value > 0')
             colored_queue = green(queue_key)
-            logger.debug(f"Starting BLMOVE operation for {colored_queue} with timeout of {timeout}")
-            result = connection.blmove(queue_key, intermediate_queue.key, timeout)
+            logger.debug(f'Starting BLMOVE operation for {colored_queue} with timeout of {timeout}')
+            result: Optional[Any] = connection.blmove(queue_key, intermediate_queue.key, timeout)
             if result is None:
-                logger.debug(f"BLMOVE timeout, no jobs found on {colored_queue}")
+                logger.debug(f'BLMOVE timeout, no jobs found on {colored_queue}')
                 raise DequeueTimeout(timeout, queue_key)
             return queue_key, result
         else:  # non-blocking variant
-            result = connection.lmove(queue_key, intermediate_queue.key)
+            result = cast(Optional[Any], connection.lmove(queue_key, intermediate_queue.key))
             if result is not None:
                 return queue_key, result
             return None
@@ -1333,13 +1401,13 @@ class Queue:
     @classmethod
     def dequeue_any(
         cls,
-        queues: List['Queue'],
+        queues: Iterable['Queue'],
         timeout: Optional[int],
         connection: 'Redis',
-        job_class: Optional[Type['Job']] = None,
-        serializer: Any = None,
-        death_penalty_class: Optional[Type[BaseDeathPenalty]] = None,
-    ) -> Optional[Tuple['Job', 'Queue']]:
+        job_class: Optional[type['Job']] = None,
+        serializer: Optional[Union[Serializer, str]] = None,
+        death_penalty_class: Optional[type[BaseDeathPenalty]] = None,
+    ) -> Optional[tuple['Job', 'Queue']]:
         """Class method returning the job_class instance at the front of the given
         set of Queues, where the order of the queues is important.
 
@@ -1351,11 +1419,11 @@ class Queue:
         See the documentation of cls.lpop for the interpretation of timeout.
 
         Args:
-            queues (List[Queue]): List of queue objects
+            queues (Iterable[Queue]): Iterable of queue objects
             timeout (Optional[int]): Timeout for the LPOP
             connection (Optional[Redis], optional): Redis Connection. Defaults to None.
             job_class (Optional[Type[Job]], optional): The job class. Defaults to None.
-            serializer (Any, optional): Serializer to use. Defaults to None.
+            serializer (Optional[Union[Serializer, str]], optional): Serializer to use. Defaults to None.
             death_penalty_class (Optional[Type[BaseDeathPenalty]], optional): The death penalty class. Defaults to None.
 
         Raises:
@@ -1364,7 +1432,7 @@ class Queue:
         Returns:
             job, queue (Tuple[Job, Queue]): A tuple of Job, Queue
         """
-        job_cls: Type[Job] = backend_class(cls, 'job_class', override=job_class)  # type: ignore
+        job_cls: type[Job] = backend_class(cls, 'job_class', override=job_class)
 
         while True:
             queue_keys = [q.key for q in queues]
@@ -1391,11 +1459,10 @@ class Queue:
             except Exception as e:
                 # Attach queue information on the exception for improved error
                 # reporting
-                e.job_id = job_id
-                e.queue = queue
+                e.job_id = job_id  # type: ignore[attr-defined]
+                e.queue = queue  # type: ignore[attr-defined]
                 raise e
             return job, queue
-        return None, None
 
     # Total ordering definition (the rest of the required Python methods are
     # auto-generated by the @total_ordering decorator)
@@ -1413,7 +1480,7 @@ class Queue:
         return hash(self.name)
 
     def __repr__(self):  # noqa  # pragma: no cover
-        return '{0}({1!r})'.format(self.__class__.__name__, self.name)
+        return f'{self.__class__.__name__}({self.name!r})'
 
     def __str__(self):
-        return '<{0} {1}>'.format(self.__class__.__name__, self.name)
+        return f'<{self.__class__.__name__} {self.name}>'

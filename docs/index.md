@@ -9,7 +9,7 @@ to have a low barrier to entry.  It can be integrated in your web stack easily.
 
 RQ requires Redis >= 3.0.0.
 
-## Getting started
+## Getting Started
 
 First, run a Redis server.  You can use an existing one.  To put jobs on
 queues, you don't have to do anything special, just define your typically
@@ -39,6 +39,7 @@ from my_module import count_words_at_url
 result = q.enqueue(count_words_at_url, 'http://nvie.com')
 ```
 
+### Scheduling Jobs
 Scheduling jobs are similarly easy:
 
 ```python
@@ -49,6 +50,23 @@ job = queue.enqueue_at(datetime(2019, 10, 8, 9, 15), say_hello)
 job = queue.enqueue_in(timedelta(seconds=10), say_hello)
 ```
 
+## Repeating Jobs
+
+To repeat jobs multiple times:
+
+```python
+from rq.repeat import Repeat
+
+# Repeat job 3 times after successful completion, with 60 second intervals
+job = queue.enqueue(say_hello, repeat=Repeat(times=3, interval=60))
+
+# Use different intervals between repetitions
+job = queue.enqueue(say_hello, repeat=Repeat(times=3, interval=[10, 30, 60]))
+```
+
+Note that jobs will only repeat after successful executions. To retry failed jobs, use `Retry`.
+
+### Retrying Failed Jobs
 You can also ask RQ to retry failed jobs:
 
 ```python
@@ -61,7 +79,7 @@ queue.enqueue(say_hello, retry=Retry(max=3))
 queue.enqueue(say_hello, retry=Retry(max=3, interval=[10, 30, 60]))
 ```
 
-### The worker
+### The Worker
 
 To start executing enqueued function calls in the background, start a worker
 from your project's directory:
@@ -83,12 +101,17 @@ Simply use the following command to install the latest released version:
 
     pip install rq
 
-If you want the cutting edge version (that may well be broken), use this:
 
-    pip install git+https://github.com/nvie/rq.git@master#egg=rq
+## High Level Overview
 
+There are several important concepts in RQ:
+1. `Queue`: contains a list of `Job` instances to be executed in a FIFO manner.
+2. `Job`: contains the function to be executed by the worker.
+3. `Worker`: responsible for getting `Job` instances from a `Queue` and executing them.
+4. `Execution`: contains runtime data of a `Job`, created by a `Worker` when it executes a `Job`.
+5. `Result`: stores the outcome of an `Execution`, whether it succeeded or failed.
 
-## Project history
+## Project History
 
 This project has been inspired by the good parts of [Celery][1], [Resque][2]
 and [this snippet][3], and has been created as a lightweight alternative to

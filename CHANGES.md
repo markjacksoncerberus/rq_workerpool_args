@@ -1,7 +1,71 @@
-### RQ 2.0 (unreleased)
+### RQ 2.6 (2025-09-06)
+* Added `CronScheduler.all()` that returns a list of active schedulers. Thanks @selwin!
+* Various internal cleanups and refactoring. Thanks @selwin!
+
+### RQ 2.5 (2025-08-15)
+* `CronScheduler` now supports running periodic jobs based on cron string. Thanks @selwin!
+* Fixed an issue where `SpawnWorker` does not properly register successful job executions. Thanks @selwin!
+* Fixed an issue where `Worker` may fail to register custom job and queue classes. Thanks @armicron!
+* Added `result.worker_name` to easily trace which `Worker` generated the result. Thanks @selwin!
+
+### RQ 2.4.1 (2025-07-20)
+* `Worker` will now automatically choose `TimerDeathPenalty` if `UnixSignalDeathPenalty` is not available. Thanks @selwin!
+* Introduced `CREATED` `Job` status for jobs that are not enqueued not deferred. Thanks @selwin!
+* `Worker` can now import `Job` and `Queue` classes from string. Thanks @selwin!
+* Fixed a bug in `Group.cleanup()`. Thanks @dixoncrews-gdl!
+* Logging improvements and code cleanups. Thanks @selwin, @SpecLad!
+
+### RQ 2.4.0 (2025-06-14)
+* Added `rq cron` CLI command. Thanks @selwin!
+* Various tests, typing improvements and cleanups. Thanks @SpecLad!
+* When a job is canceled, you can now optionally clean it from dependencies using `job.cancel(remove_from_dependencies=True)`. Thanks @Marishka17!
+* RQ now requires Python >= 3.9. Thanks @Jankovn and @selwin!
+
+### RQ 2.3.3 (2025-05-10)
+* `WorkerPool` now accepts `queue_class` argument. Thanks @amonsh1!
+* Disallow `redis-py=6.0.0`. Thanks @selwin and @terencehonles!
+* Minor typing improvements. Thanks @SpecLad!
+
+### RQ 2.3.2 (2025-04-13)
+* Don't log job description when `log_job_description` is set to False. Thanks @danilopeixoto!
+* Fixes an issue where `pubsub_thread` may die in the background. Thanks @ankush!
+
+### RQ 2.3.1 (2025-04-03)
+* Fixes an issue running RQ on Windows. Thanks @selwin!
+
+### RQ 2.3.0 (2025-04-03)
+* Added the feature to repeat jobs. Thanks @selwin!
+* Officially support Valkey. Thanks @selwin!
+* Fixes an issue that prevents jobs from being enqueued across multiple with using Redis pipeline. Thanks @Nativu5!
+
+### RQ 2.2.0 (2025-03-22)
+* Added `SpawnWorker` that uses `multiprocessing.spawn` to spawn worker processes. This makes RQ usable in operating systems without `os.fork()` like Windows. Thanks @selwin!
+* RQ now always use timezone aware timestamps. Thanks @deathtracktor!
+* `StartedJobRegistry.cleanup()` now properly creates job results. Thanks @OlegZv!
+* Fixed a bug in worker logging configuration. Thanks @rlaminseok0824!
+* Reworked RQ's pubsub thread to not use polling. Thanks @ankush!
+* Fixed a bug where `WorkerPool` status is never set to `STARTED`. Thanks @taleinat!
+* `Worker.monitor_work_horse()` now properly handles `InvalidJobOperation`. Thanks @fancyweb!
+* `queue.enqueue_many` now always registers the queue in RQ's queue registry. Thanks @eswolinsky3241!
+* Minor fixes and improvements. Thanks @hongquan, @OlegZv, @victorb, @rparini!
+
+### RQ 2.1.0 (2024-12-23)
+* `job.id` must not contain `:`. Thanks @sanurielf!
+* Various type hint improvements by @terencehonles!
+* `job.ended_at` should be set when job is run synchronously. Thanks @alexprabhat99!
+* `Group.all()` now properly handles non existing group. Thanks @eswolinsky3241!
+* Use `ruff` instead of `black` as formatter. Thanks @hongquan!
+
+### RQ 2.0 (2024-10-28)
 
 New Features:
-* Support for multiple job executions. A job can now properly manage multiple executions running simultaneously, allowing future support for long running scheduled jobs.
+* Multiple job executions: a job can now have multiple executions running simultaneously. This will enable future support for long running scheduled jobs. Thanks @selwin!
+* `Worker(default_worker_ttl=10)` is deprecated in favor of `Worker(worker_ttl=10)`. Thanks @stv8!
+* Added a `cleanup` parameter to `registry.get_job_ids()` and `registry.get_job_count()`. Thanks @anton-daneyko-ultramarin!
+* Added support for AWS Elasticache Serverless Redis. Thanks @bobbywatson3!
+* You can now specify TTL for deferred jobs. Thanks @hberntsen!
+* RQ's code base is now typed (mostly). Thanks @terencehonles!
+* Other minor fixes and improvements. Thanks @hongquan, @rbange, @jackkinsella, @terencehonles, @wckao, @sim6!
 
 Breaking Changes:
 * Dropped support for Redis server < 4
@@ -17,7 +81,7 @@ Bug Fixes:
 * Fixes an issue where Redis connection does not expose `name` attribute. Thanks @wckao!
 * `job.get_status()` will now always return `JobStatus` enum. Thanks @indepndnt!
 * Queue key should always be created even if jobs are deferred. Thanks @sim6!
-* Minor fixes and improvements. Thanks @hongquan, @rbange, 
+* RQ's pubsub thread will now attempt to reconnect on Redis connection errors. Thanks @fcharlier!
 
 ### RQ 1.16.2 (2024-05-01)
 * Fixed a bug that may cause jobs from intermediate queue to be moved to FailedJobRegistry. Thanks @selwin!

@@ -3,11 +3,12 @@ import os
 import sys
 import time
 from ast import literal_eval
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial, update_wrapper
 from json import JSONDecodeError, loads
 from shutil import get_terminal_size
+from typing import Type, cast
 
 import click
 from redis import Redis
@@ -22,7 +23,7 @@ from rq.defaults import (
     DEFAULT_WORKER_CLASS,
 )
 from rq.logutils import setup_loghandlers
-from rq.utils import import_attribute, parse_timeout
+from rq.utils import import_attribute, import_job_class, import_worker_class, now, parse_timeout
 from rq.worker import WorkerStatus
 
 red = partial(click.style, fg='red')
@@ -196,13 +197,13 @@ def show_workers(queues, raw, by_queue, queue_class, worker_class, connection: R
             queue_dict[queue] = worker_class.all(queue=queue, connection=connection)
 
         if queue_dict:
-            max_length = max(len(q.name) for q, in queue_dict.keys())
+            max_length = max(len(q.name) for (q,) in queue_dict.keys())
         else:
             max_length = 0
 
         for queue in queue_dict:
             if queue_dict[queue]:
-                queues_str = ", ".join(
+                queues_str = ', '.join(
                     sorted(map(lambda w: '%s (%s)' % (w.name, state_symbol(w.get_state())), queue_dict[queue]))
                 )
             else:
@@ -238,23 +239,45 @@ def refresh(interval, func, *args):
 
 def setup_loghandlers_from_args(verbose, quiet, date_format, log_format):
     if verbose and quiet:
-        raise RuntimeError("Flags --verbose and --quiet are mutually exclusive.")
+        raise RuntimeError('Flags --verbose and --quiet are mutually exclusive.')
 
     if verbose:
         level = 'DEBUG'
     elif quiet:
         level = 'WARNING'
     else:
-        level = 'INFO'
+        # Pass None not to set logging level explicitly
+        level = None
     setup_loghandlers(level, date_format=date_format, log_format=log_format)
 
 
-def parse_function_arg(argument, arg_pos):
-    class ParsingMode(Enum):
-        PLAIN_TEXT = 0
-        JSON = 1
-        LITERAL_EVAL = 2
+class ParsingMode(Enum):
+    PLAIN_TEXT = 0
+    JSON = 1
+    LITERAL_EVAL = 2
 
+
+def _parse_json_value(value, keyword, arg_pos):
+    """Parse value as JSON with error handling."""
+    try:
+        return loads(value)
+    except JSONDecodeError:
+        raise click.BadParameter('Unable to parse %s as JSON.' % (keyword or '%s. non keyword argument' % arg_pos))
+
+
+def _parse_literal_eval_value(value, keyword, arg_pos):
+    """Parse value using literal_eval with error handling."""
+    try:
+        return literal_eval(value)
+    except Exception:
+        raise click.BadParameter(
+            'Unable to eval %s as Python object. See '
+            'https://docs.python.org/3/library/ast.html#ast.literal_eval'
+            % (keyword or '%s. non keyword argument' % arg_pos)
+        )
+
+
+def parse_function_arg(argument, arg_pos):
     keyword = None
     if argument.startswith(':'):  # no keyword, json
         mode = ParsingMode.JSON
@@ -281,25 +304,15 @@ def parse_function_arg(argument, arg_pos):
 
     if value.startswith('@'):
         try:
-            with open(value[1:], 'r') as file:
+            with open(value[1:]) as file:
                 value = file.read()
         except FileNotFoundError:
             raise click.FileError(value[1:], 'Not found')
 
     if mode == ParsingMode.JSON:  # json
-        try:
-            value = loads(value)
-        except JSONDecodeError:
-            raise click.BadParameter('Unable to parse %s as JSON.' % (keyword or '%s. non keyword argument' % arg_pos))
+        value = _parse_json_value(value, keyword, arg_pos)
     elif mode == ParsingMode.LITERAL_EVAL:  # literal_eval
-        try:
-            value = literal_eval(value)
-        except Exception:
-            raise click.BadParameter(
-                'Unable to eval %s as Python object. See '
-                'https://docs.python.org/3/library/ast.html#ast.literal_eval'
-                % (keyword or '%s. non keyword argument' % arg_pos)
-            )
+        value = _parse_literal_eval_value(value, keyword, arg_pos)
 
     return keyword, value
 
@@ -312,7 +325,7 @@ def parse_function_args(arguments):
         keyword, value = parse_function_arg(argument, len(args) + 1)
         if keyword is not None:
             if keyword in kwargs:
-                raise click.BadParameter('You can\'t specify multiple values for the same keyword.')
+                raise click.BadParameter("You can't specify multiple values for the same keyword.")
             kwargs[keyword] = value
         else:
             args.append(value)
@@ -322,8 +335,8 @@ def parse_function_args(arguments):
 def parse_schedule(schedule_in, schedule_at):
     if schedule_in is not None:
         if schedule_at is not None:
-            raise click.BadArgumentUsage('You can\'t specify both --schedule-in and --schedule-at')
-        return datetime.now(timezone.utc) + timedelta(seconds=parse_timeout(schedule_in))
+            raise click.BadArgumentUsage("You can't specify both --schedule-in and --schedule-at")
+        return now() + timedelta(seconds=parse_timeout(schedule_in))
     elif schedule_at is not None:
         return datetime.strptime(schedule_at, '%Y-%m-%dT%H:%M:%S')
 
@@ -343,7 +356,7 @@ class CliConfig:
         path=None,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         self._connection = None
         self.url = url
         self.config = config
@@ -353,11 +366,11 @@ class CliConfig:
                 sys.path.append(pth)
 
         try:
-            self.worker_class = import_attribute(worker_class)
+            self.worker_class = import_worker_class(worker_class)
         except (ImportError, AttributeError) as exc:
             raise click.BadParameter(str(exc), param_hint='--worker-class')
         try:
-            self.job_class = import_attribute(job_class)
+            self.job_class = import_job_class(job_class)
         except (ImportError, AttributeError) as exc:
             raise click.BadParameter(str(exc), param_hint='--job-class')
 
@@ -372,7 +385,7 @@ class CliConfig:
             raise click.BadParameter(str(exc), param_hint='--queue-class')
 
         try:
-            self.connection_class = import_attribute(connection_class)
+            self.connection_class: Type[Redis] = cast(Type[Redis], import_attribute(connection_class))
         except (ImportError, AttributeError) as exc:
             raise click.BadParameter(str(exc), param_hint='--connection-class')
 

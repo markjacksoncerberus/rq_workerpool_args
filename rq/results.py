@@ -21,6 +21,7 @@ class Result:
         SUCCESSFUL = 1
         FAILED = 2
         STOPPED = 3
+        RETRIED = 4
 
     def __init__(
         self,
@@ -31,6 +32,7 @@ class Result:
         created_at: Optional[datetime] = None,
         return_value: Optional[Any] = None,
         exc_string: Optional[str] = None,
+        worker_name: str = '',
         serializer=None,
     ):
         self.return_value = return_value
@@ -41,6 +43,7 @@ class Result:
         self.connection = connection
         self.job_id = job_id
         self.id = id
+        self.worker_name = worker_name
 
     def __repr__(self):
         return f'Result(id={self.id}, type={self.Type(self.type).name})'
@@ -55,25 +58,39 @@ class Result:
         return bool(self.id)
 
     @classmethod
-    def create(cls, job, type, ttl, return_value=None, exc_string=None, pipeline=None):
+    def create(cls, job, type, ttl, return_value=None, exc_string=None, worker_name='', pipeline=None) -> 'Result':
         result = cls(
             job_id=job.id,
             type=type,
             connection=job.connection,
             return_value=return_value,
             exc_string=exc_string,
+            worker_name=worker_name,
             serializer=job.serializer,
         )
         result.save(ttl=ttl, pipeline=pipeline)
         return result
 
     @classmethod
-    def create_failure(cls, job, ttl, exc_string, pipeline=None):
+    def create_failure(cls, job, ttl, exc_string, worker_name='', pipeline=None) -> 'Result':
         result = cls(
             job_id=job.id,
             type=cls.Type.FAILED,
             connection=job.connection,
             exc_string=exc_string,
+            worker_name=worker_name,
+            serializer=job.serializer,
+        )
+        result.save(ttl=ttl, pipeline=pipeline)
+        return result
+
+    @classmethod
+    def create_retried(cls, job, ttl, worker_name='', pipeline=None) -> 'Result':
+        result = cls(
+            job_id=job.id,
+            type=cls.Type.RETRIED,
+            connection=job.connection,
+            worker_name=worker_name,
             serializer=job.serializer,
         )
         result.save(ttl=ttl, pipeline=pipeline)
@@ -120,6 +137,8 @@ class Result:
         if exc_string:
             exc_string = zlib.decompress(b64decode(exc_string)).decode()
 
+        worker_name = payload.get('worker_name', b'').decode() if payload.get('worker_name') else ''
+
         return Result(
             job_id,
             Result.Type(int(payload['type'])),
@@ -128,6 +147,7 @@ class Result:
             created_at=created_at,
             return_value=return_value,
             exc_string=exc_string,
+            worker_name=worker_name,
         )
 
     @classmethod
@@ -152,7 +172,7 @@ class Result:
             # Unlike blpop, xread timeout is in miliseconds. "0-0" is the special value for the
             # first item in the stream, like '-' for xrevrange.
             timeout_ms = timeout * 1000
-            response = job.connection.xread({cls.get_key(job.id): "0-0"}, block=timeout_ms)
+            response = job.connection.xread({cls.get_key(job.id): '0-0'}, block=timeout_ms)
             if not response:
                 return None
             response = response[0]  # Querying single stream only.
@@ -190,8 +210,8 @@ class Result:
                 connection.expire(key, ttl)
         return self.id
 
-    def serialize(self):
-        data = {'type': self.type.value}
+    def serialize(self) -> dict[str, Any]:
+        data: dict[str, Any] = {'type': self.type.value, 'worker_name': self.worker_name}
 
         if self.exc_string is not None:
             data['exc_string'] = b64encode(zlib.compress(self.exc_string.encode())).decode()

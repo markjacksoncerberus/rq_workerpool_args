@@ -106,7 +106,7 @@ q.enqueue('my_package.my_module.my_func', 3, 4)
 ```
 
 ### Bulk Job Enqueueing
-_New in version 1.9.0._  
+_New in version 1.9.0._
 You can also enqueue multiple jobs in bulk with `queue.enqueue_many()` and `Queue.prepare_data()`:
 
 ```python
@@ -135,7 +135,7 @@ with q.connection.pipeline() as pipe:
 `Queue.prepare_data` accepts all arguments that `Queue.parse_args` does.
 
 ### Grouping jobs
-_New in version 2.0._  
+_New in version 2.0._
 Multiple jobs can be added to a Group to allow them to be tracked by a single ID:
 
 ```python
@@ -214,7 +214,7 @@ job_1 = queue.enqueue(div_by_zero)
 dependency = Dependency(
     jobs=[job_1],
     allow_failure=True,    # allow_failure defaults to False
-    enqueue_at_front=True  # enqueue_at_front defaults to False  
+    enqueue_at_front=True  # enqueue_at_front defaults to False
 )
 job_2 = queue.enqueue(say_hello, depends_on=dependency)
 
@@ -239,16 +239,16 @@ queue.enqueue(say_hello, on_success=report_success, on_failure=report_failure, o
 
 _New in version 1.14.0_
 
-RQ lets you configure the method and timeout for each callback - success, failure, and stopped.   
+RQ lets you configure the method and timeout for each callback - success, failure, and stopped.
 To configure callback timeouts, use RQ's
 `Callback` object that accepts `func` and `timeout` arguments. For example:
 
 ```python
 from rq import Callback
-queue.enqueue(say_hello, 
-              on_success=Callback(report_success),  # default callback timeout (60 seconds) 
+queue.enqueue(say_hello,
+              on_success=Callback(report_success),  # default callback timeout (60 seconds)
               on_failure=Callback(report_failure, timeout=10), # 10 seconds timeout
-              on_stopped=Callback(report_stopped, timeout="2m")) # 2 minute timeout  
+              on_stopped=Callback(report_stopped, timeout="2m")) # 2 minute timeout
 ```
 
 You can also pass the function as a string reference: `Callback('my_package.my_module.my_func')`
@@ -295,7 +295,7 @@ def report_stopped(job, connection):
 ```
 
 Stopped callbacks are functions that are executed when a worker receives a command to stop
-a job that is currently executing. See [Stopping a Job](https://python-rq.org/docs/workers/#stopping-a-job).
+a job that is currently executing. See [Stopping a Job](/docs/workers/#stopping-a-job).
 
 
 ### CLI Enqueueing
@@ -404,7 +404,7 @@ q.delete(delete_jobs=True) # Passing in `True` will remove all jobs in the queue
 ### On the Design
 
 With RQ, you don't have to set up any queues upfront, and you don't have to
-specify any channels, exchanges, routing rules, or whatnot.  You can just put
+specify any channels, exchanges, routing rules or whatnot.  You can just put
 jobs onto any queue you want.  As soon as you enqueue a job to a queue that
 does not exist yet, it is created on the fly.
 

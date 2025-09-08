@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from multiprocessing import Process
 from unittest import mock
 
+import pytest
 import redis
 
 from rq import Queue
@@ -52,7 +53,7 @@ class TestScheduledJobRegistry(RQTestCase):
         chunk_size = 5
 
         for index in range(0, chunk_size * 2):
-            self.connection.zadd(registry.key, {'foo_{}'.format(index): 1})
+            self.connection.zadd(registry.key, {f'foo_{index}': 1})
 
         self.assertEqual(len(registry.get_jobs_to_schedule(timestamp, chunk_size)), chunk_size)
         self.assertEqual(len(registry.get_jobs_to_schedule(timestamp, chunk_size * 2)), chunk_size * 2)
@@ -129,6 +130,24 @@ class TestScheduledJobRegistry(RQTestCase):
             self.assertEqual(
                 self.connection.zscore(registry.key, job.id), 1546300800
             )  # 2019-01-01 UTC in Unix timestamp
+
+    def test_remove_jobs(self):
+        """Removing job ids from ScheduledJobRegistry. Will be deprecated in the future."""
+        queue = Queue(connection=self.connection)
+        registry = ScheduledJobRegistry(queue=queue)
+        timestamp = current_timestamp()
+
+        self.connection.zadd(registry.key, {'foo': 1})
+        self.connection.zadd(registry.key, {'bar': timestamp + 10})
+        self.connection.zadd(registry.key, {'baz': timestamp + 30})
+
+        with pytest.deprecated_call():
+            # without timestamp it should remove everything till the current timestamp
+            registry.remove_jobs()
+            self.assertListEqual(registry.get_jobs_to_schedule(timestamp=timestamp + 100), ['bar', 'baz'])
+            registry.remove_jobs(timestamp=timestamp + 15)
+            # should remove bar job
+            self.assertListEqual(registry.get_jobs_to_schedule(timestamp=timestamp + 100), ['baz'])
 
 
 class TestScheduler(RQTestCase):
@@ -329,7 +348,7 @@ class TestWorker(RQTestCase):
 
         worker = Worker(queues=[queue], connection=self.connection)
         worker.work(burst=True, with_scheduler=True)
-        self.assertIsNotNone(worker.scheduler)
+        assert worker.scheduler
         self.assertIsNone(self.connection.get(worker.scheduler.get_locking_key('default')))
 
     @mock.patch.object(RQScheduler, 'acquire_locks')
@@ -422,7 +441,7 @@ class TestQueue(RQTestCase):
         self.assertEqual(len(registry), 1)
 
         # enqueue_at set job status to "scheduled"
-        self.assertTrue(job.get_status() == 'scheduled')
+        self.assertEqual(job.get_status(), 'scheduled')
 
         # After enqueue_scheduled_jobs() is called, the registry is empty
         # and job is enqueued
@@ -446,8 +465,8 @@ class TestQueue(RQTestCase):
         self.assertEqual(len(registry), 2)
 
         # enqueue_at set job status to "scheduled"
-        self.assertTrue(job_first.get_status() == 'scheduled')
-        self.assertTrue(job_second.get_status() == 'scheduled')
+        self.assertEqual(job_first.get_status(), 'scheduled')
+        self.assertEqual(job_second.get_status(), 'scheduled')
 
         # After enqueue_scheduled_jobs() is called, the registry is empty
         # and job is enqueued
@@ -484,7 +503,7 @@ class TestQueue(RQTestCase):
             connection_pool=redis.ConnectionPool(
                 connection_class=CustomRedisConnection,
                 db=4,
-                custom_arg="foo",
+                custom_arg='foo',
             )
         )
 
@@ -494,7 +513,7 @@ class TestQueue(RQTestCase):
         scheduler_connection = scheduler.connection.connection_pool.get_connection('info')
 
         self.assertEqual(scheduler_connection.__class__, CustomRedisConnection)
-        self.assertEqual(scheduler_connection.get_custom_arg(), "foo")
+        self.assertEqual(scheduler_connection.get_custom_arg(), 'foo')
 
     def test_no_custom_connection_pool(self):
         """Connection pool customizing must not interfere if we're using a standard
